@@ -389,3 +389,383 @@ def plot_gp_results_enhanced(
     plt.setp(ax4.get_yticklabels(), visible=False)
 
     return fig, ax1, ax2, ax3, ax4
+
+
+# -------------------- Stochastic EI Bayesian Optimization --------------------
+
+
+class KernelGPRegressor:
+    """Small adapter exposing predict(X, return_std=True) for the existing GP code."""
+
+    def __init__(self, kernel=rbf_kernel, gamma=4.0, noise_var=1e-6):
+        self.kernel = kernel
+        self.gamma = gamma
+        self.noise_var = noise_var
+        self.X_train = None
+        self.y_train = None
+        self.Ky_inv = None
+
+    def fit(self, X, y):
+        self.X_train = np.asarray(X, dtype=float)
+        self.y_train = np.asarray(y, dtype=float).reshape(-1, 1)
+        self.Ky_inv = fit_gp(self.kernel, self.X_train, self.gamma, self.noise_var)
+        return self
+
+    def predict(self, X, return_std=True):
+        if self.X_train is None or self.y_train is None or self.Ky_inv is None:
+            raise RuntimeError("KernelGPRegressor must be fit before predict is called.")
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+
+        K_star = self.kernel(self.X_train, X, self.gamma)
+        mu = (K_star.T @ self.Ky_inv @ self.y_train).ravel()
+        K_xx_diag = np.ones(X.shape[0])
+        cov_reduction = np.sum(K_star * (self.Ky_inv @ K_star), axis=0)
+        var = np.maximum(0.0, K_xx_diag - cov_reduction)
+        std = np.sqrt(var)
+        if return_std:
+            return mu, std
+        return mu
+
+
+def _as_bounds_array(bounds):
+    bounds = np.asarray(bounds, dtype=float)
+    if bounds.ndim != 2 or bounds.shape[1] != 2:
+        raise ValueError("bounds must have shape (d, 2).")
+    return bounds
+
+
+def sample_input_perturbations(x, Sigma, n_samples, bounds, rng):
+    """Sample clipped Gaussian input perturbations around a design point."""
+    rng = np.random.default_rng() if rng is None else rng
+    x = np.asarray(x, dtype=float).reshape(-1)
+    Sigma = np.asarray(Sigma, dtype=float)
+    bounds = _as_bounds_array(bounds)
+    if Sigma.shape != (x.size, x.size):
+        raise ValueError("Sigma must have shape (d, d), where x has shape (d,).")
+    if bounds.shape[0] != x.size:
+        raise ValueError("bounds must have one [lower, upper] row per x dimension.")
+
+    deltas = rng.multivariate_normal(np.zeros(x.size), Sigma, size=n_samples)
+    X_perturbed = x.reshape(1, -1) + deltas
+    return np.clip(X_perturbed, bounds[:, 0], bounds[:, 1])
+
+
+def stochastic_expected_improvement(
+    x,
+    gp,
+    y_best,
+    Sigma,
+    bounds,
+    n_perturb=64,
+    xi=0.0,
+    rng=None,
+):
+    """Monte Carlo stochastic EI for minimization under input perturbations."""
+    rng = np.random.default_rng() if rng is None else rng
+    X_perturbed = sample_input_perturbations(x, Sigma, n_perturb, bounds, rng)
+    mu, sigma = gp.predict(X_perturbed, return_std=True)
+    improvement = float(y_best) - mu - xi
+
+    eps = 1e-12
+    ei = np.empty_like(improvement, dtype=float)
+    near_zero = sigma <= eps
+    ei[near_zero] = np.maximum(improvement[near_zero], 0.0)
+    stable = ~near_zero
+    if np.any(stable):
+        Z = improvement[stable] / sigma[stable]
+        ei[stable] = improvement[stable] * norm.cdf(Z) + sigma[stable] * norm.pdf(Z)
+    return float(np.mean(ei))
+
+
+def stochastic_expected_improvement_existing_gp(
+    kernel,
+    x_new,
+    X_sample,
+    y_sample,
+    Ky_opt_inv,
+    length_scale,
+    Sigma,
+    bounds,
+    n_perturb=64,
+    xi=0.0,
+    rng=None,
+):
+    """sEI acquisition adapter for optimize_acquisition and the existing GP arrays."""
+    gp = KernelGPRegressor(kernel=kernel, gamma=length_scale)
+    gp.X_train = np.asarray(X_sample, dtype=float)
+    gp.y_train = np.asarray(y_sample, dtype=float).reshape(-1, 1)
+    gp.Ky_inv = Ky_opt_inv
+    return stochastic_expected_improvement(
+        x_new,
+        gp,
+        np.min(y_sample),
+        Sigma,
+        bounds,
+        n_perturb=n_perturb,
+        xi=xi,
+        rng=rng,
+    )
+
+
+ACQUISITION_FUNCTIONS = {
+    "EI": expected_improvement,
+    "LCB": lower_confidence_bound,
+    "sEI": stochastic_expected_improvement_existing_gp,
+}
+
+
+def get_acquisition_function(name):
+    """Return an acquisition function by name, including the stochastic EI option."""
+    try:
+        return ACQUISITION_FUNCTIONS[name]
+    except KeyError as exc:
+        available = ", ".join(sorted(ACQUISITION_FUNCTIONS))
+        raise ValueError(f"Unknown acquisition '{name}'. Available: {available}") from exc
+
+
+def branin(x):
+    """Standard Branin function in 2D for minimization."""
+    x = np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        x = x.reshape(1, -1)
+    x1 = x[:, 0]
+    x2 = x[:, 1]
+    a = 1.0
+    b = 5.1 / (4.0 * np.pi**2)
+    c = 5.0 / np.pi
+    r = 6.0
+    s = 10.0
+    t = 1.0 / (8.0 * np.pi)
+    return a * (x2 - b * x1**2 + c * x1 - r) ** 2 + s * (1.0 - t) * np.cos(x1) + s
+
+
+def hartmann6(x):
+    """Hartmann-6 function with the conventional negative-valued minimization form."""
+    x = np.asarray(x, dtype=float)
+    if x.ndim == 1:
+        x = x.reshape(1, -1)
+    alpha = np.array([1.0, 1.2, 3.0, 3.2])
+    A = np.array(
+        [
+            [10, 3, 17, 3.5, 1.7, 8],
+            [0.05, 10, 17, 0.1, 8, 14],
+            [3, 3.5, 1.7, 10, 17, 8],
+            [17, 8, 0.05, 10, 0.1, 14],
+        ],
+        dtype=float,
+    )
+    P = 1e-4 * np.array(
+        [
+            [1312, 1696, 5569, 124, 8283, 5886],
+            [2329, 4135, 8307, 3736, 1004, 9991],
+            [2348, 1451, 3522, 2883, 3047, 6650],
+            [4047, 8828, 8732, 5743, 1091, 381],
+        ],
+        dtype=float,
+    )
+    inner = np.sum(A[None, :, :] * (x[:, None, :] - P[None, :, :]) ** 2, axis=2)
+    return -np.sum(alpha[None, :] * np.exp(-inner), axis=1)
+
+
+def default_sigma_for_problem(function_name, bounds):
+    """Default diagonal perturbation covariance for the supported synthetic functions."""
+    bounds = _as_bounds_array(bounds)
+    name = function_name.lower()
+    d = bounds.shape[0]
+    if name == "branin":
+        widths = bounds[:, 1] - bounds[:, 0]
+        return np.diag((0.05 * widths) ** 2)
+    if name in {"hartmann6", "hartmann-6"}:
+        return (0.03**2) * np.eye(d)
+    if name == "ackley":
+        return (0.5**2) * np.eye(d)
+    raise ValueError(f"Unknown function_name: {function_name}")
+
+
+def get_synthetic_problem(function_name="ackley", d=None, Sigma=None):
+    """Return (f_true, bounds, Sigma, canonical_name) for supported minimization problems."""
+    name = function_name.lower()
+    if name == "branin":
+        bounds = np.array([[-5.0, 10.0], [0.0, 15.0]], dtype=float)
+        f_true = branin
+        canonical_name = "Branin"
+    elif name in {"hartmann6", "hartmann-6"}:
+        bounds = np.array([[0.0, 1.0]] * 6, dtype=float)
+        f_true = hartmann6
+        canonical_name = "Hartmann-6"
+    elif name == "ackley":
+        d = 6 if d is None else int(d)
+        if d not in {2, 6}:
+            raise ValueError("Ackley dimension must be 2 or 6 for this PoC.")
+        bounds = np.array([[-5.0, 5.0]] * d, dtype=float)
+        f_true = ackley_nd
+        canonical_name = "Ackley"
+    else:
+        raise ValueError("function_name must be one of: branin, hartmann6, ackley.")
+    Sigma = (
+        default_sigma_for_problem(name, bounds)
+        if Sigma is None
+        else np.asarray(Sigma, dtype=float)
+    )
+    return f_true, bounds, Sigma, canonical_name
+
+
+def optimize_acquisition_by_random_search(acq_func, bounds, rng, n_candidates=None):
+    """Maximize an acquisition function by uniform random search."""
+    bounds = _as_bounds_array(bounds)
+    d = bounds.shape[0]
+    if n_candidates is None:
+        n_candidates = 2000 if d <= 2 else 5000
+    X_cand = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n_candidates, d))
+    values = np.array([acq_func(x) for x in X_cand])
+    best_idx = int(np.argmax(values))
+    return X_cand[best_idx], float(values[best_idx])
+
+
+def recommend_by_posterior_mean(gp, bounds, rng, n_candidates=None):
+    """Recommend the point with the lowest GP posterior mean on random candidates."""
+    bounds = _as_bounds_array(bounds)
+    d = bounds.shape[0]
+    if n_candidates is None:
+        n_candidates = 2000 if d <= 2 else 5000
+    X_cand = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n_candidates, d))
+    mu = gp.predict(X_cand, return_std=False)
+    best_idx = int(np.argmin(mu))
+    return X_cand[best_idx], float(mu[best_idx])
+
+
+def validate_true_function_mc(candidates, f_true, Sigma, bounds, n_mc=2048, rng=None):
+    """Validate candidate robustness with true-function Monte Carlo perturbations."""
+    rng = np.random.default_rng() if rng is None else rng
+    results = {}
+    for name, x in candidates.items():
+        X_mc = sample_input_perturbations(x, Sigma, n_mc, bounds, rng)
+        y_mc = np.asarray(f_true(X_mc), dtype=float).reshape(-1)
+        nominal_value = float(
+            np.asarray(f_true(np.asarray(x).reshape(1, -1))).reshape(-1)[0]
+        )
+        results[name] = {
+            "mean": float(np.mean(y_mc)),
+            "std": float(np.std(y_mc)),
+            "q05": float(np.quantile(y_mc, 0.05)),
+            "q50": float(np.quantile(y_mc, 0.50)),
+            "q95": float(np.quantile(y_mc, 0.95)),
+            "nominal_value": nominal_value,
+        }
+    return results
+
+
+def run_sei_bo(
+    function_name="ackley",
+    d=None,
+    Sigma=None,
+    n_initial=None,
+    n_iter=30,
+    n_perturb_sEI=64,
+    n_mc_validation=2048,
+    random_seed=0,
+    gamma=1.0,
+    noise_std=0.0,
+    xi=0.0,
+    n_candidates=None,
+):
+    """Run a minimal sEI Bayesian Optimization loop on a supported synthetic function."""
+    rng = np.random.default_rng(random_seed)
+    f_true, bounds, Sigma, canonical_name = get_synthetic_problem(
+        function_name, d=d, Sigma=Sigma
+    )
+    dim = bounds.shape[0]
+    n_initial = 5 * dim if n_initial is None else int(n_initial)
+    noise_var = noise_std**2
+
+    X_train = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n_initial, dim))
+    y_train = f_true(X_train).reshape(-1, 1)
+    if noise_std > 0:
+        y_train = y_train + rng.normal(0.0, noise_std, size=y_train.shape)
+
+    for _ in range(n_iter):
+        gp = KernelGPRegressor(gamma=gamma, noise_var=noise_var).fit(X_train, y_train)
+        y_best = float(np.min(y_train))
+        perturb_seed = int(rng.integers(0, np.iinfo(np.uint32).max))
+
+        def acq(x):
+            # Common random numbers within each BO iteration for reproducible candidate comparisons.
+            local_rng = np.random.default_rng(perturb_seed)
+            return stochastic_expected_improvement(
+                x,
+                gp,
+                y_best,
+                Sigma,
+                bounds,
+                n_perturb=n_perturb_sEI,
+                xi=xi,
+                rng=local_rng,
+            )
+
+        x_next, _ = optimize_acquisition_by_random_search(acq, bounds, rng, n_candidates)
+        y_next = f_true(x_next.reshape(1, -1)).reshape(1, 1)
+        if noise_std > 0:
+            y_next = y_next + rng.normal(0.0, noise_std, size=(1, 1))
+        X_train = np.vstack([X_train, x_next])
+        y_train = np.vstack([y_train, y_next])
+
+    gp = KernelGPRegressor(gamma=gamma, noise_var=noise_var).fit(X_train, y_train)
+    best_idx = int(np.argmin(y_train))
+    best_observed_x = X_train[best_idx]
+    best_observed_y = float(y_train[best_idx, 0])
+    final_recommended_x, _ = recommend_by_posterior_mean(gp, bounds, rng, n_candidates)
+    candidates = {
+        "best_observed": best_observed_x,
+        "best_sEI_recommended": final_recommended_x,
+    }
+    validation = validate_true_function_mc(
+        candidates, f_true, Sigma, bounds, n_mc=n_mc_validation, rng=rng
+    )
+    robust_best = min(validation, key=lambda name: validation[name]["mean"])
+
+    return {
+        "function_name": canonical_name,
+        "dimension": dim,
+        "n_initial": n_initial,
+        "n_iter": n_iter,
+        "n_perturb_sEI": n_perturb_sEI,
+        "Sigma": Sigma,
+        "bounds": bounds,
+        "X_train": X_train,
+        "y_train": y_train,
+        "best_observed_y": best_observed_y,
+        "best_observed_x": best_observed_x,
+        "final_recommended_x": final_recommended_x,
+        "validation": validation,
+        "robust_best": robust_best,
+    }
+
+
+def print_sei_bo_summary(result):
+    """Print BO and validation summaries for run_sei_bo output."""
+    print("BO summary")
+    print(f"function name: {result['function_name']}")
+    print(f"dimension d: {result['dimension']}")
+    print(f"n_initial: {result['n_initial']}")
+    print(f"n_iter: {result['n_iter']}")
+    print(f"n_perturb_sEI: {result['n_perturb_sEI']}")
+    print(f"Sigma:\n{result['Sigma']}")
+    print(f"best observed y: {result['best_observed_y']:.6f}")
+    print(f"best observed x: {result['best_observed_x']}")
+    print(f"final recommended x: {result['final_recommended_x']}")
+    print("\nvalidation summary")
+    header = (
+        f"{'candidate':<24} {'nominal_value':>14} {'perturbed_mean':>16} "
+        f"{'perturbed_std':>15} {'q05':>12} {'q50':>12} {'q95':>12}"
+    )
+    print(header)
+    print("-" * len(header))
+    for name, stats in result["validation"].items():
+        print(
+            f"{name:<24} {stats['nominal_value']:>14.6f} {stats['mean']:>16.6f} "
+            f"{stats['std']:>15.6f} {stats['q05']:>12.6f} "
+            f"{stats['q50']:>12.6f} {stats['q95']:>12.6f}"
+        )
+    print(f"\nrobust best by perturbed_mean: {result['robust_best']}")
