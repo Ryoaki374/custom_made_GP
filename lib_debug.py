@@ -404,14 +404,35 @@ class KernelGPRegressor:
         self.X_train = None
         self.y_train = None
         self.Ky_inv = None
+        self.Ky_cholesky = None
 
     def fit(self, X, y):
         self.X_train = np.asarray(X, dtype=float)
         self.y_train = np.asarray(y, dtype=float).reshape(-1, 1)
-        self.Ky_inv = fit_gp(self.kernel, self.X_train, self.gamma, self.noise_var)
+        K = self.kernel(self.X_train, self.X_train, self.gamma)
+        Ky = (
+            K
+            + self.noise_var * np.identity(len(self.X_train))
+            + 1e-6 * np.identity(len(self.X_train))
+        )
+        try:
+            self.Ky_cholesky = np.linalg.cholesky(Ky)
+        except np.linalg.LinAlgError:
+            Ky = Ky + 1e-5 * np.identity(len(self.X_train))
+            self.Ky_cholesky = np.linalg.cholesky(Ky)
+        self.Ky_inv = np.linalg.solve(
+            self.Ky_cholesky.T,
+            np.linalg.solve(self.Ky_cholesky, np.identity(len(self.X_train))),
+        )
         return self
 
-    def predict(self, X, return_std=True):
+    def predict(self, X, return_std=True, return_cov=False):
+        """Predict GP posterior mean with optional std or full covariance.
+
+        The return_cov=True branch is needed by robust LCB on J(x), because the
+        robust objective averages correlated posterior random variables at the
+        perturbed input locations.
+        """
         if self.X_train is None or self.y_train is None or self.Ky_inv is None:
             raise RuntimeError("KernelGPRegressor must be fit before predict is called.")
         X = np.asarray(X, dtype=float)
@@ -420,6 +441,18 @@ class KernelGPRegressor:
 
         K_star = self.kernel(self.X_train, X, self.gamma)
         mu = (K_star.T @ self.Ky_inv @ self.y_train).ravel()
+
+        if return_cov:
+            K_xx = self.kernel(X, X, self.gamma)
+            if self.Ky_cholesky is not None:
+                V = np.linalg.solve(self.Ky_cholesky, K_star)
+                cov = K_xx - V.T @ V
+            else:
+                cov = K_xx - K_star.T @ self.Ky_inv @ K_star
+            cov = 0.5 * (cov + cov.T)
+            cov += 1e-10 * np.eye(X.shape[0])
+            return mu, cov
+
         K_xx_diag = np.ones(X.shape[0])
         cov_reduction = np.sum(K_star * (self.Ky_inv @ K_star), axis=0)
         var = np.maximum(0.0, K_xx_diag - cov_reduction)
@@ -450,6 +483,98 @@ def sample_input_perturbations(x, Sigma, n_samples, bounds, rng):
     deltas = rng.multivariate_normal(np.zeros(x.size), Sigma, size=n_samples)
     X_perturbed = x.reshape(1, -1) + deltas
     return np.clip(X_perturbed, bounds[:, 0], bounds[:, 1])
+
+
+def _clip_perturbed_points(x, perturbations, bounds):
+    """Apply precomputed perturbation deltas to x and clip to box bounds."""
+    x = np.asarray(x, dtype=float).reshape(-1)
+    perturbations = np.asarray(perturbations, dtype=float)
+    bounds = _as_bounds_array(bounds)
+    if perturbations.ndim != 2 or perturbations.shape[1] != x.size:
+        raise ValueError("perturbations must have shape (n_samples, d).")
+    if bounds.shape[0] != x.size:
+        raise ValueError("bounds must have one [lower, upper] row per x dimension.")
+    return np.clip(x.reshape(1, -1) + perturbations, bounds[:, 0], bounds[:, 1])
+
+
+def robust_lcb_on_J(
+    x,
+    gp,
+    Sigma,
+    bounds,
+    n_perturb=64,
+    kappa=2.0,
+    rng=None,
+    perturbations=None,
+    eps=1e-12,
+    return_details=False,
+):
+    """Robust LCB acquisition on J(x)=E_delta[f(x+delta)] for minimization.
+
+    The posterior variance of J is computed from the full GP posterior covariance
+    of the perturbed points: var_J = 1^T K_post(Z, Z) 1 / M^2.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    x = np.asarray(x, dtype=float).reshape(-1)
+    if perturbations is None:
+        Z = sample_input_perturbations(x, Sigma, n_perturb, bounds, rng)
+    else:
+        Z = _clip_perturbed_points(x, perturbations, bounds)
+        n_perturb = Z.shape[0]
+
+    mu, cov = gp.predict(Z, return_cov=True)
+    cov = 0.5 * (np.asarray(cov, dtype=float) + np.asarray(cov, dtype=float).T)
+    mu_J = float(np.mean(mu))
+    var_J = float(np.sum(cov) / (n_perturb**2))
+    var_J = max(var_J, eps)
+    sigma_J = float(np.sqrt(var_J))
+    lcb_J = float(mu_J - kappa * sigma_J)
+
+    if not return_details:
+        return lcb_J
+    return {
+        "lcb": lcb_J,
+        "mu_J": mu_J,
+        "sigma_J": sigma_J,
+        "var_J": var_J,
+        "Z": Z,
+        "mu_Z": np.asarray(mu, dtype=float),
+    }
+
+
+def robust_lcb_on_J_existing_gp(
+    kernel,
+    x_new,
+    X_sample,
+    y_sample,
+    Ky_opt_inv,
+    length_scale,
+    Sigma,
+    bounds,
+    n_perturb=64,
+    kappa=2.0,
+    rng=None,
+    perturbations=None,
+):
+    """Adapter for the existing acquisition maximizer.
+
+    robust_lcb_on_J returns an LCB to minimize, while optimize_acquisition
+    maximizes acquisition scores. Therefore this adapter returns -LCB.
+    """
+    gp = KernelGPRegressor(kernel=kernel, gamma=length_scale)
+    gp.X_train = np.asarray(X_sample, dtype=float)
+    gp.y_train = np.asarray(y_sample, dtype=float).reshape(-1, 1)
+    gp.Ky_inv = Ky_opt_inv
+    return -robust_lcb_on_J(
+        x_new,
+        gp,
+        Sigma,
+        bounds,
+        n_perturb=n_perturb,
+        kappa=kappa,
+        rng=rng,
+        perturbations=perturbations,
+    )
 
 
 def stochastic_expected_improvement(
@@ -513,6 +638,7 @@ ACQUISITION_FUNCTIONS = {
     "EI": expected_improvement,
     "LCB": lower_confidence_bound,
     "sEI": stochastic_expected_improvement_existing_gp,
+    "robust_lcb_J": robust_lcb_on_J_existing_gp,
 }
 
 
@@ -636,6 +762,103 @@ def recommend_by_posterior_mean(gp, bounds, rng, n_candidates=None):
     return X_cand[best_idx], float(mu[best_idx])
 
 
+def optimize_robust_lcb_by_random_search(
+    gp,
+    Sigma,
+    bounds,
+    rng,
+    n_perturb=64,
+    kappa=2.0,
+    n_candidates=None,
+):
+    """Minimize robust LCB on J(x) by uniform random candidate search."""
+    bounds = _as_bounds_array(bounds)
+    d = bounds.shape[0]
+    if n_candidates is None:
+        n_candidates = 2000 if d <= 2 else 5000
+    X_cand = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n_candidates, d))
+
+    L_sigma = np.linalg.cholesky(np.asarray(Sigma, dtype=float) + 1e-12 * np.eye(d))
+    standard_normals = rng.normal(size=(n_perturb, d))
+    perturbations = standard_normals @ L_sigma.T
+
+    values = np.array(
+        [
+            robust_lcb_on_J(
+                x,
+                gp,
+                Sigma,
+                bounds,
+                n_perturb=n_perturb,
+                kappa=kappa,
+                perturbations=perturbations,
+            )
+            for x in X_cand
+        ]
+    )
+    best_idx = int(np.argmin(values))
+    return X_cand[best_idx], float(values[best_idx])
+
+
+def recommend_by_robust_lcb_on_J(
+    gp,
+    Sigma,
+    bounds,
+    rng,
+    n_perturb=64,
+    kappa=2.0,
+    n_candidates=None,
+):
+    """Recommend the point with minimum robust LCB on J(x)."""
+    return optimize_robust_lcb_by_random_search(
+        gp,
+        Sigma,
+        bounds,
+        rng,
+        n_perturb=n_perturb,
+        kappa=kappa,
+        n_candidates=n_candidates,
+    )
+
+
+def validate_surrogate_robust_mean(
+    candidates,
+    gp,
+    Sigma,
+    bounds,
+    n_mc=512,
+    rng=None,
+    use_cov=True,
+    eps=1e-12,
+):
+    """Validate candidates by GP-posterior robust mean under input perturbations."""
+    rng = np.random.default_rng() if rng is None else rng
+    results = {}
+    for name, x in candidates.items():
+        x = np.asarray(x, dtype=float).reshape(-1)
+        Z = sample_input_perturbations(x, Sigma, n_mc, bounds, rng)
+        nominal_mu, nominal_std = gp.predict(x.reshape(1, -1), return_std=True)
+
+        if use_cov:
+            mu, cov = gp.predict(Z, return_cov=True)
+            cov = 0.5 * (np.asarray(cov, dtype=float) + np.asarray(cov, dtype=float).T)
+            robust_mean = float(np.mean(mu))
+            robust_var = float(np.sum(cov) / (n_mc**2))
+            robust_std = float(np.sqrt(max(robust_var, eps)))
+        else:
+            mu, _ = gp.predict(Z, return_std=True)
+            robust_mean = float(np.mean(mu))
+            robust_std = float(np.std(mu))
+
+        results[name] = {
+            "posterior_robust_mean": robust_mean,
+            "posterior_robust_std": robust_std,
+            "nominal_posterior_mean": float(nominal_mu[0]),
+            "nominal_posterior_std": float(nominal_std[0]),
+        }
+    return results
+
+
 def validate_true_function_mc(candidates, f_true, Sigma, bounds, n_mc=2048, rng=None):
     """Validate candidate robustness with true-function Monte Carlo perturbations."""
     rng = np.random.default_rng() if rng is None else rng
@@ -742,6 +965,140 @@ def run_sei_bo(
         "robust_best": robust_best,
     }
 
+
+
+def run_robust_lcb_J_bo(
+    function_name="ackley",
+    d=None,
+    Sigma=None,
+    n_initial=None,
+    n_iter=30,
+    n_perturb_acq=64,
+    n_perturb_validation=512,
+    random_seed=0,
+    gamma=1.0,
+    noise_std=0.0,
+    kappa=2.0,
+    n_candidates=None,
+):
+    """Run minimal robust LCB on J(x) Bayesian Optimization."""
+    rng = np.random.default_rng(random_seed)
+    f_true, bounds, Sigma, canonical_name = get_synthetic_problem(
+        function_name, d=d, Sigma=Sigma
+    )
+    dim = bounds.shape[0]
+    n_initial = 5 * dim if n_initial is None else int(n_initial)
+    noise_var = noise_std**2
+
+    X_train = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n_initial, dim))
+    y_train = f_true(X_train).reshape(-1, 1)
+    if noise_std > 0:
+        y_train = y_train + rng.normal(0.0, noise_std, size=y_train.shape)
+
+    final_robust_lcb_x = None
+    final_robust_lcb_value = None
+    for _ in range(n_iter):
+        gp = KernelGPRegressor(gamma=gamma, noise_var=noise_var).fit(X_train, y_train)
+        x_next, acq_value = optimize_robust_lcb_by_random_search(
+            gp,
+            Sigma,
+            bounds,
+            rng,
+            n_perturb=n_perturb_acq,
+            kappa=kappa,
+            n_candidates=n_candidates,
+        )
+        final_robust_lcb_x = x_next
+        final_robust_lcb_value = acq_value
+
+        # BO observes the nominal black-box value exactly once at x_next.
+        y_next = f_true(x_next.reshape(1, -1)).reshape(1, 1)
+        if noise_std > 0:
+            y_next = y_next + rng.normal(0.0, noise_std, size=(1, 1))
+        X_train = np.vstack([X_train, x_next])
+        y_train = np.vstack([y_train, y_next])
+
+    gp = KernelGPRegressor(gamma=gamma, noise_var=noise_var).fit(X_train, y_train)
+    best_idx = int(np.argmin(y_train))
+    best_observed_x = X_train[best_idx]
+    best_observed_y = float(y_train[best_idx, 0])
+
+    if final_robust_lcb_x is None:
+        final_robust_lcb_x, final_robust_lcb_value = recommend_by_robust_lcb_on_J(
+            gp,
+            Sigma,
+            bounds,
+            rng,
+            n_perturb=n_perturb_acq,
+            kappa=kappa,
+            n_candidates=n_candidates,
+        )
+
+    candidates = {
+        "best_observed": best_observed_x,
+        "robust_lcb_J": final_robust_lcb_x,
+    }
+    validation = validate_surrogate_robust_mean(
+        candidates, gp, Sigma, bounds, n_mc=n_perturb_validation, rng=rng, use_cov=True
+    )
+    robust_best = min(
+        validation, key=lambda name: validation[name]["posterior_robust_mean"]
+    )
+
+    return {
+        "function_name": canonical_name,
+        "dimension": dim,
+        "n_initial": n_initial,
+        "n_iter": n_iter,
+        "n_perturb_acq": n_perturb_acq,
+        "n_perturb_validation": n_perturb_validation,
+        "kappa": kappa,
+        "Sigma": Sigma,
+        "bounds": bounds,
+        "X_train": X_train,
+        "y_train": y_train,
+        "best_observed_y": best_observed_y,
+        "best_observed_x": best_observed_x,
+        "final_robust_lcb_J_recommended_x": final_robust_lcb_x,
+        "final_robust_lcb_J_value": final_robust_lcb_value,
+        "validation": validation,
+        "robust_best": robust_best,
+    }
+
+
+def print_robust_lcb_J_bo_summary(result):
+    """Print BO and surrogate robust mean validation summaries."""
+    print("BO summary")
+    print(f"function name: {result['function_name']}")
+    print(f"dimension d: {result['dimension']}")
+    print(f"bounds:\n{result['bounds']}")
+    print(f"n_initial: {result['n_initial']}")
+    print(f"n_iter: {result['n_iter']}")
+    print(f"n_perturb_acq: {result['n_perturb_acq']}")
+    print(f"kappa: {result['kappa']}")
+    print(f"Sigma:\n{result['Sigma']}")
+    print(f"best observed y: {result['best_observed_y']:.6f}")
+    print(f"best observed x: {result['best_observed_x']}")
+    print(
+        "final robust_lcb_J recommended x: "
+        f"{result['final_robust_lcb_J_recommended_x']}"
+    )
+    print("\nvalidation summary")
+    header = (
+        f"{'candidate':<18} {'nominal_posterior_mean':>24} "
+        f"{'nominal_posterior_std':>23} {'posterior_robust_mean':>24} "
+        f"{'posterior_robust_std':>23}"
+    )
+    print(header)
+    print("-" * len(header))
+    for name, stats in result["validation"].items():
+        print(
+            f"{name:<18} {stats['nominal_posterior_mean']:>24.6f} "
+            f"{stats['nominal_posterior_std']:>23.6f} "
+            f"{stats['posterior_robust_mean']:>24.6f} "
+            f"{stats['posterior_robust_std']:>23.6f}"
+        )
+    print(f"\nrobust best by posterior_robust_mean: {result['robust_best']}")
 
 def print_sei_bo_summary(result):
     """Print BO and validation summaries for run_sei_bo output."""
