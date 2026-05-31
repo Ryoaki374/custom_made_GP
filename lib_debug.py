@@ -114,7 +114,7 @@ def f1_sharp_vs_broad(x):
     peak_a = 1.25 * np.exp(-np.sum((x - a) ** 2, axis=-1) / (2.0 * s_a**2))
     peak_b = 1.00 * np.exp(-np.sum((x - b) ** 2, axis=-1) / (2.0 * s_b**2))
 
-    return peak_a + peak_b
+    return -peak_a - peak_b
 
 
 def f2_boundary_risk(x, out_of_bounds_value=None):
@@ -155,7 +155,7 @@ def f2_boundary_risk(x, out_of_bounds_value=None):
         -np.sum((x - inner_center) ** 2, axis=-1) / (2.0 * s_c**2)
     )
 
-    y = edge + inner
+    y = -edge - inner
 
     if out_of_bounds_value is not None:
         in_bounds = np.all((0.0 <= x) & (x <= 1.0), axis=-1)
@@ -194,7 +194,7 @@ def f3_oscillatory_fragility(x):
         -((x[..., 1] - 0.50) ** 2) / (2.0 * s_r**2)
     )
 
-    return fragile + robust
+    return -fragile - robust
 
 
 # -------------------- Core GP Functions --------------------
