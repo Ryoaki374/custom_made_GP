@@ -89,6 +89,114 @@ def griewank_nd(x: np.ndarray) -> np.ndarray:
     return 1 + term_sum - term_prod
 
 
+def f1_sharp_vs_broad(x):
+    """
+    Sharp optimum vs broad robust basin.
+
+    Parameters
+    ----------
+    x : array-like, shape (..., 2)
+        Input points in [0, 1]^2.
+
+    Returns
+    -------
+    y : ndarray, shape (...)
+        Function values.
+    """
+    x = np.asarray(x, dtype=float)
+
+    a = np.array([0.30, 0.30])
+    b = np.array([0.72, 0.72])
+
+    s_a = 0.035
+    s_b = 0.13
+
+    peak_a = 1.25 * np.exp(-np.sum((x - a) ** 2, axis=-1) / (2.0 * s_a**2))
+    peak_b = 1.00 * np.exp(-np.sum((x - b) ** 2, axis=-1) / (2.0 * s_b**2))
+
+    return peak_a + peak_b
+
+
+def f2_boundary_risk(x, out_of_bounds_value=None):
+    """
+    Boundary optimum with infeasible perturbation risk.
+
+    If out_of_bounds_value is not None, points outside [0, 1]^2 are assigned
+    that value. If None, the function is evaluated directly without clipping
+    or penalties.
+
+    Parameters
+    ----------
+    x : array-like, shape (..., 2)
+        Input points.
+    out_of_bounds_value : float or None
+        Value assigned to out-of-domain points.
+
+    Returns
+    -------
+    y : ndarray, shape (...)
+        Function values.
+    """
+    x = np.asarray(x, dtype=float)
+
+    edge_center = np.array([0.95, 0.50])
+    inner_center = np.array([0.68, 0.50])
+
+    s1 = 0.035
+    s2 = 0.12
+    s_c = 0.15
+
+    edge = 1.3 * np.exp(
+        -((x[..., 0] - edge_center[0]) ** 2) / (2.0 * s1**2)
+        -((x[..., 1] - edge_center[1]) ** 2) / (2.0 * s2**2)
+    )
+
+    inner = 1.0 * np.exp(
+        -np.sum((x - inner_center) ** 2, axis=-1) / (2.0 * s_c**2)
+    )
+
+    y = edge + inner
+
+    if out_of_bounds_value is not None:
+        in_bounds = np.all((0.0 <= x) & (x <= 1.0), axis=-1)
+        y = np.where(in_bounds, y, out_of_bounds_value)
+
+    return y
+
+
+def f3_oscillatory_fragility(x):
+    """
+    High nominal ridge with oscillatory fragility.
+
+    Parameters
+    ----------
+    x : array-like, shape (..., 2)
+        Input points in [0, 1]^2.
+
+    Returns
+    -------
+    y : ndarray, shape (...)
+        Function values.
+    """
+    x = np.asarray(x, dtype=float)
+
+    s_x = 0.06
+    s_r = 0.18
+
+    fragile = (
+        1.15
+        * np.exp(-((x[..., 0] - 0.35) ** 2) / (2.0 * s_x**2))
+        * (0.75 + 0.25 * np.cos(24.0 * np.pi * (x[..., 1] - 0.50)))
+    )
+
+    robust = 0.95 * np.exp(
+        -((x[..., 0] - 0.72) ** 2) / (2.0 * s_r**2)
+        -((x[..., 1] - 0.50) ** 2) / (2.0 * s_r**2)
+    )
+
+    return fragile + robust
+
+
 # -------------------- Core GP Functions --------------------
 
 
@@ -707,6 +815,19 @@ def default_sigma_for_problem(function_name, bounds):
         return (0.03**2) * np.eye(d)
     if name == "ackley":
         return (0.5**2) * np.eye(d)
+    if name in {
+        "f1",
+        "f1_sharp_vs_broad",
+        "sharp_vs_broad",
+        "f2",
+        "f2_boundary_risk",
+        "boundary_risk",
+        "f3",
+        "f3_oscillatory_fragility",
+        "oscillatory_fragility",
+    }:
+        widths = bounds[:, 1] - bounds[:, 0]
+        return np.diag((0.05 * widths) ** 2)
     raise ValueError(f"Unknown function_name: {function_name}")
 
 
@@ -728,8 +849,23 @@ def get_synthetic_problem(function_name="ackley", d=None, Sigma=None):
         bounds = np.array([[-5.0, 5.0]] * d, dtype=float)
         f_true = ackley_nd
         canonical_name = "Ackley"
+    elif name in {"f1", "f1_sharp_vs_broad", "sharp_vs_broad"}:
+        bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+        f_true = f1_sharp_vs_broad
+        canonical_name = "f1_sharp_vs_broad"
+    elif name in {"f2", "f2_boundary_risk", "boundary_risk"}:
+        bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+        f_true = f2_boundary_risk
+        canonical_name = "f2_boundary_risk"
+    elif name in {"f3", "f3_oscillatory_fragility", "oscillatory_fragility"}:
+        bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+        f_true = f3_oscillatory_fragility
+        canonical_name = "f3_oscillatory_fragility"
     else:
-        raise ValueError("function_name must be one of: branin, hartmann6, ackley.")
+        raise ValueError(
+            "function_name must be one of: branin, hartmann6, ackley, "
+            "f1_sharp_vs_broad, f2_boundary_risk, f3_oscillatory_fragility."
+        )
     Sigma = (
         default_sigma_for_problem(name, bounds)
         if Sigma is None
