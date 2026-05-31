@@ -112,34 +112,44 @@ def f1(x):
     return -np.sum(peaks, axis=-1)
 
 
-def f2(x, out_of_bounds_value=None):
+def f2(x):
     """
-    Boundary peak near (0.95, 0.50) and inner peak near (0.68, 0.50).
+    Step-like variant of f1 with the sharp peak shifted upward in x2.
     Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
-    centers = np.array([
-        [0.95, 0.50],
-        [0.68, 0.50],
-    ])
-    scales = np.array([
-        [0.035, 0.12],
-        [0.15, 0.15],
-    ])
-    weights = np.array([1.30, 1.00])
+    sharp_start = np.array([0.30, 0.30])
+    sharp_end = sharp_start + np.array([0.00, 0.20])
+    broad_center = np.array([0.72, 0.72])
 
-    diff = x[..., None, :] - centers
-    r2 = np.sum((diff / scales) ** 2, axis=-1)
+    sharp_scale = 0.035
+    broad_scale = 0.13
+    sharp_start_weight = 1.25
+    sharp_end_weight = 1.05
+    broad_weight = 1.00
 
-    peaks = weights * np.exp(-0.5 * r2)
-    y = -np.sum(peaks, axis=-1)
+    t = np.clip(
+        (x[..., 1] - sharp_start[1]) / (sharp_end[1] - sharp_start[1]),
+        0.0,
+        1.0,
+    )
+    smooth_t = t**2 * (3.0 - 2.0 * t)
+    sharp_weight = (1.0 - smooth_t) * sharp_start_weight + smooth_t * sharp_end_weight
 
-    if out_of_bounds_value is not None:
-        in_bounds = np.all((0.0 <= x) & (x <= 1.0), axis=-1)
-        y = np.where(in_bounds, y, out_of_bounds_value)
+    dy_to_step = np.maximum(sharp_start[1] - x[..., 1], 0.0) + np.maximum(
+        x[..., 1] - sharp_end[1], 0.0
+    )
+    sharp_step = sharp_weight * np.exp(
+        -((x[..., 0] - sharp_start[0]) ** 2) / (2.0 * sharp_scale**2)
+        -(dy_to_step**2) / (2.0 * sharp_scale**2)
+    )
 
-    return y
+    broad_peak = broad_weight * np.exp(
+        -np.sum((x - broad_center) ** 2, axis=-1) / (2.0 * broad_scale**2)
+    )
+
+    return -sharp_step - broad_peak
 
 
 def f3(x):
