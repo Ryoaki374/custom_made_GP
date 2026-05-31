@@ -114,7 +114,7 @@ def f1_sharp_vs_broad(x):
     peak_a = 1.25 * np.exp(-np.sum((x - a) ** 2, axis=-1) / (2.0 * s_a**2))
     peak_b = 1.00 * np.exp(-np.sum((x - b) ** 2, axis=-1) / (2.0 * s_b**2))
 
-    return peak_a + peak_b
+    return -peak_a - peak_b
 
 
 def f2_boundary_risk(x, out_of_bounds_value=None):
@@ -155,7 +155,7 @@ def f2_boundary_risk(x, out_of_bounds_value=None):
         -np.sum((x - inner_center) ** 2, axis=-1) / (2.0 * s_c**2)
     )
 
-    y = edge + inner
+    y = -edge - inner
 
     if out_of_bounds_value is not None:
         in_bounds = np.all((0.0 <= x) & (x <= 1.0), axis=-1)
@@ -194,7 +194,12 @@ def f3_oscillatory_fragility(x):
         -((x[..., 1] - 0.50) ** 2) / (2.0 * s_r**2)
     )
 
-    return fragile + robust
+    return -fragile - robust
+
+
+f1 = f1_sharp_vs_broad
+f2 = f2_boundary_risk
+f3 = f3_oscillatory_fragility
 
 
 # -------------------- Core GP Functions --------------------
@@ -851,16 +856,16 @@ def get_synthetic_problem(function_name="ackley", d=None, Sigma=None):
         canonical_name = "Ackley"
     elif name in {"f1", "f1_sharp_vs_broad", "sharp_vs_broad"}:
         bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
-        f_true = f1_sharp_vs_broad
-        canonical_name = "f1_sharp_vs_broad"
+        f_true = f1
+        canonical_name = "f1"
     elif name in {"f2", "f2_boundary_risk", "boundary_risk"}:
         bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
-        f_true = f2_boundary_risk
-        canonical_name = "f2_boundary_risk"
+        f_true = f2
+        canonical_name = "f2"
     elif name in {"f3", "f3_oscillatory_fragility", "oscillatory_fragility"}:
         bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
-        f_true = f3_oscillatory_fragility
-        canonical_name = "f3_oscillatory_fragility"
+        f_true = f3
+        canonical_name = "f3"
     else:
         raise ValueError(
             "function_name must be one of: branin, hartmann6, ackley, "
