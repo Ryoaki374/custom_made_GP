@@ -114,42 +114,33 @@ def f1(x):
 
 def f2(x):
     """
-    Step-like variant of f1 with the sharp peak shifted upward in x2.
+    Step-like variant of f1 with the broad peak translated along the z-axis.
     Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
-    sharp_start = np.array([0.30, 0.30])
-    sharp_end = sharp_start + np.array([0.00, 0.20])
-    broad_center = np.array([0.72, 0.72])
+    centers = np.array([
+        [0.30, 0.30],
+        [0.72, 0.72],
+    ])
+    scales = np.array([0.035, 0.13])
+    weights = np.array([1.25, 1.00])
 
-    sharp_scale = 0.035
-    broad_scale = 0.13
-    sharp_start_weight = 1.25
-    sharp_end_weight = 1.05
-    broad_weight = 1.00
+    diff = x[..., None, :] - centers
+    r2 = np.sum(diff**2, axis=-1)
+    peaks = weights * np.exp(-r2 / (2.0 * scales**2))
 
+    transition_start = 0.46
+    transition_end = 0.58
     t = np.clip(
-        (x[..., 1] - sharp_start[1]) / (sharp_end[1] - sharp_start[1]),
+        (x[..., 0] - transition_start) / (transition_end - transition_start),
         0.0,
         1.0,
     )
     smooth_t = t**2 * (3.0 - 2.0 * t)
-    sharp_weight = (1.0 - smooth_t) * sharp_start_weight + smooth_t * sharp_end_weight
+    broad_z_shift = 0.20 * smooth_t
 
-    dy_to_step = np.maximum(sharp_start[1] - x[..., 1], 0.0) + np.maximum(
-        x[..., 1] - sharp_end[1], 0.0
-    )
-    sharp_step = sharp_weight * np.exp(
-        -((x[..., 0] - sharp_start[0]) ** 2) / (2.0 * sharp_scale**2)
-        -(dy_to_step**2) / (2.0 * sharp_scale**2)
-    )
-
-    broad_peak = broad_weight * np.exp(
-        -np.sum((x - broad_center) ** 2, axis=-1) / (2.0 * broad_scale**2)
-    )
-
-    return -sharp_step - broad_peak
+    return -np.sum(peaks, axis=-1) + broad_z_shift
 
 
 def f3(x):
