@@ -1075,6 +1075,7 @@ def run_robust_lcb_J_bo(
 
     final_robust_lcb_x = None
     final_robust_lcb_value = None
+    robust_lcb_history = []
     for _ in range(n_iter):
         gp = KernelGPRegressor(gamma=gamma, noise_var=noise_var).fit(X_train, y_train)
         x_next, acq_value = optimize_robust_lcb_by_random_search(
@@ -1088,6 +1089,7 @@ def run_robust_lcb_J_bo(
         )
         final_robust_lcb_x = x_next
         final_robust_lcb_value = acq_value
+        robust_lcb_history.append(acq_value)
 
         # BO observes the nominal black-box value exactly once at x_next.
         y_next = f_true(x_next.reshape(1, -1)).reshape(1, 1)
@@ -1113,7 +1115,6 @@ def run_robust_lcb_J_bo(
         )
 
     candidates = {
-        "best_observed": best_observed_x,
         "robust_lcb_J": final_robust_lcb_x,
     }
     validation = validate_surrogate_robust_mean(
@@ -1139,6 +1140,7 @@ def run_robust_lcb_J_bo(
         "best_observed_x": best_observed_x,
         "final_robust_lcb_J_recommended_x": final_robust_lcb_x,
         "final_robust_lcb_J_value": final_robust_lcb_value,
+        "robust_lcb_history": robust_lcb_history,
         "validation": validation,
         "robust_best": robust_best,
     }
