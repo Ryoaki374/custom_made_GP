@@ -89,94 +89,64 @@ def griewank_nd(x: np.ndarray) -> np.ndarray:
     return 1 + term_sum - term_prod
 
 
-def f1_sharp_vs_broad(x):
+def f1(x):
     """
-    Sharp optimum vs broad robust basin.
-
-    Parameters
-    ----------
-    x : array-like, shape (..., 2)
-        Input points in [0, 1]^2.
-
-    Returns
-    -------
-    y : ndarray, shape (...)
-        Function values.
+    Sharp peak at (0.20, 0.20) and broad peak at (0.72, 0.72).
+    Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
-    a = np.array([0.30, 0.30])
-    b = np.array([0.72, 0.72])
+    centers = np.array([
+        [0.20, 0.20],
+        [0.72, 0.72],
+    ])
 
-    s_a = 0.035
-    s_b = 0.13
+    scales = np.array([0.035, 0.13])
+    weights = np.array([1.25, 1.00])
 
-    peak_a = 1.25 * np.exp(-np.sum((x - a) ** 2, axis=-1) / (2.0 * s_a**2))
-    peak_b = 1.00 * np.exp(-np.sum((x - b) ** 2, axis=-1) / (2.0 * s_b**2))
+    diff = x[..., None, :] - centers
+    r2 = np.sum(diff**2, axis=-1)
 
-    return peak_a + peak_b
+    peaks = weights * np.exp(-r2 / (2.0 * scales**2))
+
+    return -np.sum(peaks, axis=-1)
 
 
-def f2_boundary_risk(x, out_of_bounds_value=None):
+def f2(x):
     """
-    Boundary optimum with infeasible perturbation risk.
-
-    If out_of_bounds_value is not None, points outside [0, 1]^2 are assigned
-    that value. If None, the function is evaluated directly without clipping
-    or penalties.
-
-    Parameters
-    ----------
-    x : array-like, shape (..., 2)
-        Input points.
-    out_of_bounds_value : float or None
-        Value assigned to out-of-domain points.
-
-    Returns
-    -------
-    y : ndarray, shape (...)
-        Function values.
+    Step-like variant of f1 with the broad peak translated along the z-axis.
+    Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
-    edge_center = np.array([0.95, 0.50])
-    inner_center = np.array([0.68, 0.50])
+    centers = np.array([
+        [0.20, 0.20],
+        [0.72, 0.72],
+    ])
+    scales = np.array([0.035, 0.13])
+    weights = np.array([1.25, 1.00])
 
-    s1 = 0.035
-    s2 = 0.12
-    s_c = 0.15
+    diff = x[..., None, :] - centers
+    r2 = np.sum(diff**2, axis=-1)
+    peaks = weights * np.exp(-r2 / (2.0 * scales**2))
 
-    edge = 1.3 * np.exp(
-        -((x[..., 0] - edge_center[0]) ** 2) / (2.0 * s1**2)
-        -((x[..., 1] - edge_center[1]) ** 2) / (2.0 * s2**2)
+    transition_start = 0.42
+    transition_end = 0.62
+    t = np.clip(
+        (x[..., 0] - transition_start) / (transition_end - transition_start),
+        0.0,
+        1.0,
     )
+    smooth_t = t**2 * (3.0 - 2.0 * t)
+    broad_z_shift = 0.20 * smooth_t
 
-    inner = 1.0 * np.exp(
-        -np.sum((x - inner_center) ** 2, axis=-1) / (2.0 * s_c**2)
-    )
-
-    y = edge + inner
-
-    if out_of_bounds_value is not None:
-        in_bounds = np.all((0.0 <= x) & (x <= 1.0), axis=-1)
-        y = np.where(in_bounds, y, out_of_bounds_value)
-
-    return y
+    return -np.sum(peaks, axis=-1) + broad_z_shift
 
 
-def f3_oscillatory_fragility(x):
+def f3(x):
     """
-    High nominal ridge with oscillatory fragility.
-
-    Parameters
-    ----------
-    x : array-like, shape (..., 2)
-        Input points in [0, 1]^2.
-
-    Returns
-    -------
-    y : ndarray, shape (...)
-        Function values.
+    Oscillatory fragile ridge near x1=0.35 and robust peak near (0.72, 0.50).
+    Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
@@ -194,7 +164,7 @@ def f3_oscillatory_fragility(x):
         -((x[..., 1] - 0.50) ** 2) / (2.0 * s_r**2)
     )
 
-    return fragile + robust
+    return -fragile - robust
 
 
 # -------------------- Core GP Functions --------------------
@@ -817,61 +787,12 @@ def default_sigma_for_problem(function_name, bounds):
         return (0.5**2) * np.eye(d)
     if name in {
         "f1",
-        "f1_sharp_vs_broad",
-        "sharp_vs_broad",
         "f2",
-        "f2_boundary_risk",
-        "boundary_risk",
         "f3",
-        "f3_oscillatory_fragility",
-        "oscillatory_fragility",
     }:
         widths = bounds[:, 1] - bounds[:, 0]
         return np.diag((0.05 * widths) ** 2)
     raise ValueError(f"Unknown function_name: {function_name}")
-
-
-def get_synthetic_problem(function_name="ackley", d=None, Sigma=None):
-    """Return (f_true, bounds, Sigma, canonical_name) for supported minimization problems."""
-    name = function_name.lower()
-    if name == "branin":
-        bounds = np.array([[-5.0, 10.0], [0.0, 15.0]], dtype=float)
-        f_true = branin
-        canonical_name = "Branin"
-    elif name in {"hartmann6", "hartmann-6"}:
-        bounds = np.array([[0.0, 1.0]] * 6, dtype=float)
-        f_true = hartmann6
-        canonical_name = "Hartmann-6"
-    elif name == "ackley":
-        d = 6 if d is None else int(d)
-        if d not in {2, 6}:
-            raise ValueError("Ackley dimension must be 2 or 6 for this PoC.")
-        bounds = np.array([[-5.0, 5.0]] * d, dtype=float)
-        f_true = ackley_nd
-        canonical_name = "Ackley"
-    elif name in {"f1", "f1_sharp_vs_broad", "sharp_vs_broad"}:
-        bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
-        f_true = f1_sharp_vs_broad
-        canonical_name = "f1_sharp_vs_broad"
-    elif name in {"f2", "f2_boundary_risk", "boundary_risk"}:
-        bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
-        f_true = f2_boundary_risk
-        canonical_name = "f2_boundary_risk"
-    elif name in {"f3", "f3_oscillatory_fragility", "oscillatory_fragility"}:
-        bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
-        f_true = f3_oscillatory_fragility
-        canonical_name = "f3_oscillatory_fragility"
-    else:
-        raise ValueError(
-            "function_name must be one of: branin, hartmann6, ackley, "
-            "f1_sharp_vs_broad, f2_boundary_risk, f3_oscillatory_fragility."
-        )
-    Sigma = (
-        default_sigma_for_problem(name, bounds)
-        if Sigma is None
-        else np.asarray(Sigma, dtype=float)
-    )
-    return f_true, bounds, Sigma, canonical_name
 
 
 def optimize_acquisition_by_random_search(acq_func, bounds, rng, n_candidates=None):
@@ -896,6 +817,19 @@ def recommend_by_posterior_mean(gp, bounds, rng, n_candidates=None):
     mu = gp.predict(X_cand, return_std=False)
     best_idx = int(np.argmin(mu))
     return X_cand[best_idx], float(mu[best_idx])
+
+
+def optimize_lcb_by_random_search(gp, bounds, rng, kappa=2.0, n_candidates=None):
+    """Minimize the standard GP lower confidence bound by uniform random search."""
+    bounds = _as_bounds_array(bounds)
+    d = bounds.shape[0]
+    if n_candidates is None:
+        n_candidates = 2000 if d <= 2 else 5000
+    X_cand = rng.uniform(bounds[:, 0], bounds[:, 1], size=(n_candidates, d))
+    mu, std = gp.predict(X_cand, return_std=True)
+    values = np.asarray(mu, dtype=float) - kappa * np.asarray(std, dtype=float)
+    best_idx = int(np.argmin(values))
+    return X_cand[best_idx], float(values[best_idx])
 
 
 def optimize_robust_lcb_by_random_search(
@@ -986,9 +920,15 @@ def validate_surrogate_robust_mean(
             robust_mean = float(np.mean(mu))
             robust_std = float(np.std(mu))
 
+        mu = np.asarray(mu, dtype=float).reshape(-1)
+        posterior_mu_sample_std = float(
+            np.sqrt(np.sum((mu - robust_mean) ** 2) / (mu.size - 1))
+        ) if mu.size > 1 else 0.0
+
         results[name] = {
             "posterior_robust_mean": robust_mean,
             "posterior_robust_std": robust_std,
+            "posterior_mu_sample_std": posterior_mu_sample_std,
             "nominal_posterior_mean": float(nominal_mu[0]),
             "nominal_posterior_std": float(nominal_std[0]),
         }
@@ -1032,9 +972,10 @@ def run_sei_bo(
 ):
     """Run a minimal sEI Bayesian Optimization loop on a supported synthetic function."""
     rng = np.random.default_rng(random_seed)
-    f_true, bounds, Sigma, canonical_name = get_synthetic_problem(
-        function_name, d=d, Sigma=Sigma
-    )
+    f_true = f1
+    bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+    Sigma = default_sigma_for_problem("f1", bounds) if Sigma is None else np.asarray(Sigma, dtype=float)
+    canonical_name = "f1"
     dim = bounds.shape[0]
     n_initial = 5 * dim if n_initial is None else int(n_initial)
     noise_var = noise_std**2
@@ -1119,9 +1060,10 @@ def run_robust_lcb_J_bo(
 ):
     """Run minimal robust LCB on J(x) Bayesian Optimization."""
     rng = np.random.default_rng(random_seed)
-    f_true, bounds, Sigma, canonical_name = get_synthetic_problem(
-        function_name, d=d, Sigma=Sigma
-    )
+    f_true = f1
+    bounds = np.array([[0.0, 1.0], [0.0, 1.0]], dtype=float)
+    Sigma = default_sigma_for_problem("f1", bounds) if Sigma is None else np.asarray(Sigma, dtype=float)
+    canonical_name = "f1"
     dim = bounds.shape[0]
     n_initial = 5 * dim if n_initial is None else int(n_initial)
     noise_var = noise_std**2
@@ -1223,7 +1165,7 @@ def print_robust_lcb_J_bo_summary(result):
     header = (
         f"{'candidate':<18} {'nominal_posterior_mean':>24} "
         f"{'nominal_posterior_std':>23} {'posterior_robust_mean':>24} "
-        f"{'posterior_robust_std':>23}"
+        f"{'posterior_robust_std':>23} {'posterior_mu_sample_std':>25}"
     )
     print(header)
     print("-" * len(header))
@@ -1232,7 +1174,8 @@ def print_robust_lcb_J_bo_summary(result):
             f"{name:<18} {stats['nominal_posterior_mean']:>24.6f} "
             f"{stats['nominal_posterior_std']:>23.6f} "
             f"{stats['posterior_robust_mean']:>24.6f} "
-            f"{stats['posterior_robust_std']:>23.6f}"
+            f"{stats['posterior_robust_std']:>23.6f} "
+            f"{stats['posterior_mu_sample_std']:>25.6f}"
         )
     print(f"\nrobust best by posterior_robust_mean: {result['robust_best']}")
 
