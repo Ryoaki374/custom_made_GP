@@ -920,9 +920,15 @@ def validate_surrogate_robust_mean(
             robust_mean = float(np.mean(mu))
             robust_std = float(np.std(mu))
 
+        mu = np.asarray(mu, dtype=float).reshape(-1)
+        posterior_mu_sample_std = float(
+            np.sqrt(np.sum((mu - robust_mean) ** 2) / (mu.size - 1))
+        ) if mu.size > 1 else 0.0
+
         results[name] = {
             "posterior_robust_mean": robust_mean,
             "posterior_robust_std": robust_std,
+            "posterior_mu_sample_std": posterior_mu_sample_std,
             "nominal_posterior_mean": float(nominal_mu[0]),
             "nominal_posterior_std": float(nominal_std[0]),
         }
@@ -1159,7 +1165,7 @@ def print_robust_lcb_J_bo_summary(result):
     header = (
         f"{'candidate':<18} {'nominal_posterior_mean':>24} "
         f"{'nominal_posterior_std':>23} {'posterior_robust_mean':>24} "
-        f"{'posterior_robust_std':>23}"
+        f"{'posterior_robust_std':>23} {'posterior_mu_sample_std':>25}"
     )
     print(header)
     print("-" * len(header))
@@ -1168,7 +1174,8 @@ def print_robust_lcb_J_bo_summary(result):
             f"{name:<18} {stats['nominal_posterior_mean']:>24.6f} "
             f"{stats['nominal_posterior_std']:>23.6f} "
             f"{stats['posterior_robust_mean']:>24.6f} "
-            f"{stats['posterior_robust_std']:>23.6f}"
+            f"{stats['posterior_robust_std']:>23.6f} "
+            f"{stats['posterior_mu_sample_std']:>25.6f}"
         )
     print(f"\nrobust best by posterior_robust_mean: {result['robust_best']}")
 
