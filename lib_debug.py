@@ -91,13 +91,13 @@ def griewank_nd(x: np.ndarray) -> np.ndarray:
 
 def f1(x):
     """
-    Sharp peak at (0.30, 0.30) and broad peak at (0.72, 0.72).
+    Sharp peak at (0.20, 0.20) and broad peak at (0.72, 0.72).
     Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
     centers = np.array([
-        [0.30, 0.30],
+        [0.20, 0.20],
         [0.72, 0.72],
     ])
 
@@ -120,7 +120,7 @@ def f2(x):
     x = np.asarray(x, dtype=float)
 
     centers = np.array([
-        [0.30, 0.30],
+        [0.20, 0.20],
         [0.72, 0.72],
     ])
     scales = np.array([0.035, 0.13])
@@ -130,8 +130,8 @@ def f2(x):
     r2 = np.sum(diff**2, axis=-1)
     peaks = weights * np.exp(-r2 / (2.0 * scales**2))
 
-    transition_start = 0.46
-    transition_end = 0.58
+    transition_start = 0.42
+    transition_end = 0.62
     t = np.clip(
         (x[..., 0] - transition_start) / (transition_end - transition_start),
         0.0,
