@@ -145,26 +145,42 @@ def f2(x):
 
 def f3(x):
     """
-    Oscillatory fragile ridge near x1=0.35 and robust peak near (0.72, 0.50).
+    Anisotropic variant of f1 with an off-diagonal covariance broad peak.
+
+    The sharp peak remains isotropic near (0.20, 0.20), while the broader peak is
+    an elliptical Gaussian with nonzero covariance between x1 and x2.  Its major
+    axis is stretched in the x1 direction so that the local susceptibility can
+    differ clearly between x1 and x2 in normalized design space.
     Returns a negative-valued function for minimization.
     """
     x = np.asarray(x, dtype=float)
 
-    s_x = 0.06
-    s_r = 0.18
+    sharp_center = np.array([0.20, 0.20])
+    sharp_scale = 0.035
+    sharp_weight = 1.25
 
-    fragile = (
-        1.15
-        * np.exp(-((x[..., 0] - 0.35) ** 2) / (2.0 * s_x**2))
-        * (0.75 + 0.25 * np.cos(24.0 * np.pi * (x[..., 1] - 0.50)))
+    broad_center = np.array([0.72, 0.72])
+    broad_weight = 1.00
+    sigma_x1 = 0.20
+    sigma_x2 = 0.07
+    rho = 0.65
+    broad_cov = np.array(
+        [
+            [sigma_x1**2, rho * sigma_x1 * sigma_x2],
+            [rho * sigma_x1 * sigma_x2, sigma_x2**2],
+        ]
     )
+    broad_cov_inv = np.linalg.inv(broad_cov)
 
-    robust = 0.95 * np.exp(
-        -((x[..., 0] - 0.72) ** 2) / (2.0 * s_r**2)
-        -((x[..., 1] - 0.50) ** 2) / (2.0 * s_r**2)
-    )
+    sharp_diff = x - sharp_center
+    sharp_r2 = np.sum(sharp_diff**2, axis=-1)
+    sharp = sharp_weight * np.exp(-sharp_r2 / (2.0 * sharp_scale**2))
 
-    return -fragile - robust
+    broad_diff = x - broad_center
+    broad_r2 = np.einsum("...i,ij,...j->...", broad_diff, broad_cov_inv, broad_diff)
+    broad = broad_weight * np.exp(-0.5 * broad_r2)
+
+    return -sharp - broad
 
 
 # -------------------- Core GP Functions --------------------
